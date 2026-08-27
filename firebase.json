@@ -1,0 +1,42 @@
+{
+  "flutter": {
+    "platforms": {
+      "android": {
+        "default": {
+          "projectId": "borewell-guard",
+          "appId": "1:207036575449:android:248a640a652436962798c8",
+          "fileOutput": "android/app/google-services.json"
+        }
+      },
+      "dart": {
+        "lib/firebase_options.dart": {
+          "projectId": "borewell-guard",
+          "configurations": {
+            "android": "1:207036575449:android:248a640a652436962798c8",
+            "ios": "1:207036575449:ios:c8f02dd4b5e3acae2798c8",
+            "macos": "1:207036575449:ios:c8f02dd4b5e3acae2798c8",
+            "web": "1:207036575449:web:e04d6f67c1ced12d2798c8",
+            "windows": "1:207036575449:web:65a615afd97ac1642798c8"
+          }
+        }
+      }
+    }
+  },
+  "functions": [
+    {
+      "source": "functions",
+      "codebase": "default",
+      "disallowLegacyRuntimeConfig": true,
+      "ignore": [
+        "node_modules",
+        ".git",
+        "firebase-debug.log",
+        "firebase-debug.*.log",
+        "*.local"
+      ],
+      "predeploy": [
+        "npm --prefix \"$RESOURCE_DIR\" run lint"
+      ]
+    }
+  ]
+}

@@ -1,0 +1,29 @@
+{
+  "project_info": {
+    "project_number": "207036575449",
+    "project_id": "borewell-guard",
+    "storage_bucket": "borewell-guard.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:207036575449:android:248a640a652436962798c8",
+        "android_client_info": {
+          "package_name": "com.example.borewell_guard_app"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyBv3-0r_VMUL1Uxqs8ic3DV9VdqYE0YvLs"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}
