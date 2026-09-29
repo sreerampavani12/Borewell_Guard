@@ -1,6 +1,7 @@
 {
   "project_info": {
     "project_number": "207036575449",
+    "firebase_url": "https://borewell-guard-default-rtdb.firebaseio.com",
     "project_id": "borewell-guard",
     "storage_bucket": "borewell-guard.firebasestorage.app"
   },

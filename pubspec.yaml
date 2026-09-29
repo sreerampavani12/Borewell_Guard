@@ -38,10 +38,13 @@ dependencies:
   firebase_messaging: ^16.6.0
   firebase_auth: ^6.6.0
   flutter_local_notifications: ^22.3.0
-
+  audioplayers: ^6.5.0
+  http: ^1.5.0
+  flutter_launcher_icons: ^0.14.4
 dev_dependencies:
   flutter_test:
     sdk: flutter
+
 
   # The "flutter_lints" package below contains a set of recommended lints to
   # encourage good coding practices. The lint set provided by the package is
@@ -91,3 +94,7 @@ flutter:
   #
   # For details regarding fonts from package dependencies,
   # see https://flutter.dev/to/font-from-package
+flutter_launcher_icons:
+  android: true
+  ios: true
+  image_path: "assets/borewell_icon.png"

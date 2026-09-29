@@ -45,8 +45,8 @@ class DefaultFirebaseOptions {
     appId: '1:207036575449:web:e04d6f67c1ced12d2798c8',
     messagingSenderId: '207036575449',
     projectId: 'borewell-guard',
-    databaseURL: 'https://borewell-guard-default-rtdb.firebaseio.com',
     authDomain: 'borewell-guard.firebaseapp.com',
+    databaseURL: 'https://borewell-guard-default-rtdb.firebaseio.com',
     storageBucket: 'borewell-guard.firebasestorage.app',
     measurementId: 'G-XX5KHGB9TK',
   );
@@ -56,6 +56,7 @@ class DefaultFirebaseOptions {
     appId: '1:207036575449:android:248a640a652436962798c8',
     messagingSenderId: '207036575449',
     projectId: 'borewell-guard',
+    databaseURL: 'https://borewell-guard-default-rtdb.firebaseio.com',
     storageBucket: 'borewell-guard.firebasestorage.app',
   );
   static const FirebaseOptions ios = FirebaseOptions(
@@ -63,6 +64,7 @@ class DefaultFirebaseOptions {
     appId: '1:207036575449:ios:c8f02dd4b5e3acae2798c8',
     messagingSenderId: '207036575449',
     projectId: 'borewell-guard',
+    databaseURL: 'https://borewell-guard-default-rtdb.firebaseio.com',
     storageBucket: 'borewell-guard.firebasestorage.app',
     iosBundleId: 'com.example.borewellGuardApp',
   );
@@ -71,6 +73,7 @@ class DefaultFirebaseOptions {
     appId: '1:207036575449:ios:c8f02dd4b5e3acae2798c8',
     messagingSenderId: '207036575449',
     projectId: 'borewell-guard',
+    databaseURL: 'https://borewell-guard-default-rtdb.firebaseio.com',
     storageBucket: 'borewell-guard.firebasestorage.app',
     iosBundleId: 'com.example.borewellGuardApp',
   );
@@ -81,6 +84,7 @@ class DefaultFirebaseOptions {
     messagingSenderId: '207036575449',
     projectId: 'borewell-guard',
     authDomain: 'borewell-guard.firebaseapp.com',
+    databaseURL: 'https://borewell-guard-default-rtdb.firebaseio.com',
     storageBucket: 'borewell-guard.firebasestorage.app',
     measurementId: 'G-HYVD1FB30Z',
   );

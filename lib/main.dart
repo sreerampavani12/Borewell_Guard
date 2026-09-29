@@ -1,5 +1,6 @@
 import 'dart:async';
-
+import 'dart:convert';
+import 'package:http/http.dart' as http;
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
@@ -7,10 +8,9 @@ import 'package:firebase_core/firebase_core.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:firebase_database/firebase_database.dart';
 import 'package:firebase_messaging/firebase_messaging.dart';
+import 'package:audioplayers/audioplayers.dart';
 
 import 'firebase_options.dart';
-import 'package:flutter_local_notifications/flutter_local_notifications.dart';
-import 'notification_service.dart';
 
 Future<void> _firebaseMessagingBackgroundHandler(RemoteMessage message) async {
   await Firebase.initializeApp(options: DefaultFirebaseOptions.currentPlatform);
@@ -52,7 +52,34 @@ class BorewellGuardApp extends StatelessWidget {
           brightness: Brightness.dark,
         ),
       ),
-      home: const LoginPage(),
+      home: const AuthGate(),
+    );
+  }
+}
+
+class AuthGate extends StatelessWidget {
+  const AuthGate({super.key});
+
+  @override
+  Widget build(BuildContext context) {
+    return StreamBuilder<User?>(
+      stream: FirebaseAuth.instance.authStateChanges(),
+      builder: (context, snapshot) {
+        // Firebase is checking the login state
+        if (snapshot.connectionState == ConnectionState.waiting) {
+          return const Scaffold(
+            body: Center(child: CircularProgressIndicator()),
+          );
+        }
+
+        // User is already logged in
+        if (snapshot.hasData) {
+          return const MainApp();
+        }
+
+        // User is logged out
+        return const LoginPage();
+      },
     );
   }
 }
@@ -892,7 +919,35 @@ class _SignupPageState extends State<SignupPage> {
 // ============================================================
 
 class NotificationService {
+  static final AudioPlayer audioPlayer = AudioPlayer();
   static StreamSubscription<RemoteMessage>? foregroundSubscription;
+
+  static const String workerUrl =
+      'https://borewell-guard-notifier.sreerampavani12.workers.dev';
+
+  static Future<void> sendPushNotification({
+    required String title,
+    required String body,
+  }) async {
+    try {
+      final token = await FirebaseMessaging.instance.getToken();
+
+      if (token == null || token.isEmpty) {
+        debugPrint('❌ FCM token not available');
+        return;
+      }
+
+      final response = await http.post(
+        Uri.parse(workerUrl),
+        headers: {'Content-Type': 'application/json'},
+        body: jsonEncode({'token': token, 'title': title, 'body': body}),
+      );
+
+      debugPrint('📡 Worker response: ${response.statusCode} ${response.body}');
+    } catch (e) {
+      debugPrint('❌ Worker notification error: $e');
+    }
+  }
 
   static Future<void> initialize() async {
     final messaging = FirebaseMessaging.instance;
@@ -943,8 +998,16 @@ class NotificationService {
     }
   }
 
-  static void playNotificationSound() {
-    SystemSound.play(SystemSoundType.alert);
+  static Future<void> playNotificationSound() async {
+    try {
+      const channel = MethodChannel('borewell_guard/audio');
+
+      await channel.invokeMethod('playEmergencySound');
+
+      debugPrint('🚨 Emergency alarm sound playing');
+    } catch (e) {
+      debugPrint('Emergency sound error: $e');
+    }
   }
 
   static Future<void> dispose() async {
@@ -976,8 +1039,9 @@ class _MainAppState extends State<MainApp> {
   int selectedIndex = 0;
 
   double dangerDistance = 2.0;
-  double currentDistance = 4.0;
+  double currentDistance = 0.0;
 
+  bool hardwareConnected = false;
   bool personDetected = false;
   bool alarmOn = false;
   bool ownerNotified = false;
@@ -987,9 +1051,10 @@ class _MainAppState extends State<MainApp> {
   StreamSubscription<DatabaseEvent>? sensorSubscription;
 
   final List<AlertItem> alerts = [];
-
   bool get danger {
-    return personDetected && currentDistance <= dangerDistance;
+    return hardwareConnected &&
+        personDetected &&
+        currentDistance <= dangerDistance;
   }
 
   @override
@@ -1004,43 +1069,129 @@ class _MainAppState extends State<MainApp> {
   // ==========================================================
 
   Future<void> initializeSystem() async {
-    await NotificationService.initialize();
+    debugPrint('🚀 initializeSystem STARTED');
 
-    final user = FirebaseAuth.instance.currentUser;
+    try {
+      await NotificationService.initialize();
+      debugPrint('✅ NotificationService initialized');
 
-    if (user != null) {
-      await NotificationService.saveToken(user.uid);
+      final user = FirebaseAuth.instance.currentUser;
+
+      if (user != null) {
+        await NotificationService.saveToken(user.uid);
+        debugPrint('✅ FCM token saved');
+      }
+
+      await settingsRef.update({'dangerDistance': dangerDistance});
+
+      debugPrint('✅ Settings updated');
+
+      sensorSubscription = sensorRef.onValue.listen(
+        (DatabaseEvent event) {
+          debugPrint('🔥 LIVE FIREBASE DATA: ${event.snapshot.value}');
+          handleSensorData(event);
+        },
+        onError: (error) {
+          debugPrint('❌ FIREBASE SENSOR LISTENER ERROR: $error');
+        },
+      );
+
+      debugPrint('✅ SENSOR LISTENER REGISTERED');
+    } catch (e) {
+      debugPrint('❌ initializeSystem ERROR: $e');
     }
-
-    await settingsRef.update({'dangerDistance': dangerDistance});
-
-    sensorSubscription = sensorRef.onValue.listen(handleSensorData);
   }
 
   // ==========================================================
   // FIREBASE SENSOR DATA
   // ==========================================================
-
   void handleSensorData(DatabaseEvent event) {
     final data = event.snapshot.value;
 
+    debugPrint('🔥 SENSOR CALLBACK: $data');
+
+    // No data from Arduino
     if (data is! Map) {
+      if (!mounted) return;
+
+      setState(() {
+        hardwareConnected = false;
+        currentDistance = 0.0;
+        personDetected = false;
+        alarmOn = false;
+        ownerNotified = false;
+      });
+
+      stopAlarm();
       return;
     }
 
-    final distance = double.tryParse('${data['distance']}') ?? currentDistance;
+    double readDistance(String key) {
+      final value = double.tryParse('${data[key]}');
+
+      if (value == null || value < 0) {
+        return -1;
+      }
+
+      // ESP32 sends centimetres → Flutter uses metres
+      return value / 100.0;
+    }
+
+    final front = readDistance('front');
+    final right = readDistance('right');
+    final back = readDistance('back');
+    final left = readDistance('left');
+
+    final distances = [front, right, back, left].where((d) => d >= 0).toList();
+
+    // Hardware data is not valid yet
+    if (distances.isEmpty) {
+      if (!mounted) return;
+
+      setState(() {
+        hardwareConnected = false;
+        currentDistance = 0.0;
+        personDetected = false;
+        alarmOn = false;
+        ownerNotified = false;
+      });
+
+      stopAlarm();
+      return;
+    }
+
+    // ----------------------------------------------------------
+    // REAL HARDWARE DATA RECEIVED
+    // ----------------------------------------------------------
+
+    final nearestDistance = distances.reduce((a, b) => a < b ? a : b);
 
     final humanDetected = data['humanDetected'] == true;
+    final hardwareDanger = data['danger'] == true;
+
+    debugPrint(
+      '📡 Front: $front m | '
+      'Right: $right m | '
+      'Back: $back m | '
+      'Left: $left m',
+    );
+
+    debugPrint(
+      '👤 Human: $humanDetected | '
+      '🚨 Danger: $hardwareDanger',
+    );
 
     if (!mounted) return;
 
     final previousDanger = danger;
 
     setState(() {
-      currentDistance = distance;
+      hardwareConnected = true;
+
+      currentDistance = nearestDistance;
       personDetected = humanDetected;
 
-      if (personDetected && currentDistance <= dangerDistance) {
+      if (hardwareDanger) {
         alarmOn = true;
         ownerNotified = true;
       } else {
@@ -1050,15 +1201,25 @@ class _MainAppState extends State<MainApp> {
       }
     });
 
-    final newDanger = personDetected && currentDistance <= dangerDistance;
+    // ----------------------------------------------------------
+    // REAL HARDWARE DANGER
+    // ----------------------------------------------------------
 
-    if (newDanger) {
+    if (hardwareDanger && !previousDanger) {
+      addDangerAlert();
+      showDangerSnackBar();
+
+      NotificationService.playNotificationSound();
+
       playAlarm();
 
-      if (!previousDanger) {
-        addDangerAlert();
-        showDangerSnackBar();
-      }
+      NotificationService.sendPushNotification(
+        title: '🚨 BOREWELL DANGER ALERT',
+        body:
+            'Object/person detected at '
+            '${nearestDistance.toStringAsFixed(2)} m. '
+            'Danger zone entered!',
+      );
     }
   }
 
@@ -1128,117 +1289,13 @@ class _MainAppState extends State<MainApp> {
   // SIMULATE DETECTION
   // ==========================================================
 
-  Future<void> simulateDetection() async {
-    final distance = dangerDistance - 0.2;
-
-    final safeDistance = distance < 0.5 ? 0.5 : distance;
-
-    setState(() {
-      personDetected = true;
-      currentDistance = safeDistance;
-      alarmOn = true;
-      ownerNotified = true;
-
-      alerts.insert(
-        0,
-        AlertItem(
-          title: 'HUMAN DETECTED',
-          message:
-              'Person detected at '
-              '${safeDistance.toStringAsFixed(1)} m. '
-              'Danger zone entered.',
-          time: TimeOfDay.now().format(context),
-          type: 'CRITICAL',
-        ),
-      );
-    });
-
-    await sensorRef.set({
-      'distance': safeDistance,
-      'humanDetected': true,
-      'alarmOn': true,
-      'ownerNotified': true,
-      'timestamp': DateTime.now().millisecondsSinceEpoch,
-    });
-
-    playAlarm();
-
-    showAlarmDialog();
-  }
-
   // ==========================================================
   // CLEAR DETECTION
   // ==========================================================
 
-  Future<void> clearDetection() async {
-    stopAlarm();
-
-    double safeDistance = dangerDistance + 1;
-
-    if (safeDistance > 5) {
-      safeDistance = 5;
-    }
-
-    setState(() {
-      personDetected = false;
-      alarmOn = false;
-      ownerNotified = false;
-      currentDistance = safeDistance;
-    });
-
-    await sensorRef.set({
-      'distance': safeDistance,
-      'humanDetected': false,
-      'alarmOn': false,
-      'ownerNotified': false,
-      'timestamp': DateTime.now().millisecondsSinceEpoch,
-    });
-
-    if (!mounted) return;
-
-    ScaffoldMessenger.of(context).showSnackBar(
-      const SnackBar(
-        content: Text('Detection cleared. System is SAFE.'),
-        backgroundColor: Colors.green,
-      ),
-    );
-  }
-
   // ==========================================================
   // UPDATE CURRENT DISTANCE
   // ==========================================================
-
-  Future<void> updateCurrentDistance(double value) async {
-    bool newAlarm = false;
-    bool newNotification = false;
-
-    setState(() {
-      currentDistance = value;
-
-      if (personDetected && currentDistance <= dangerDistance) {
-        newAlarm = true;
-        newNotification = true;
-        alarmOn = true;
-        ownerNotified = true;
-      } else {
-        alarmOn = false;
-        ownerNotified = false;
-        stopAlarm();
-      }
-    });
-
-    await sensorRef.update({
-      'distance': currentDistance,
-      'humanDetected': personDetected,
-      'alarmOn': newAlarm,
-      'ownerNotified': newNotification,
-      'timestamp': DateTime.now().millisecondsSinceEpoch,
-    });
-
-    if (newAlarm) {
-      playAlarm();
-    }
-  }
 
   // ==========================================================
   // UPDATE DANGER DISTANCE
@@ -1374,6 +1431,7 @@ class _MainAppState extends State<MainApp> {
         dangerDistance: dangerDistance,
         currentDistance: currentDistance,
         personDetected: personDetected,
+        hardwareConnected: hardwareConnected,
         alarmOn: alarmOn,
         ownerNotified: ownerNotified,
         onMonitor: () {
@@ -1392,13 +1450,11 @@ class _MainAppState extends State<MainApp> {
         dangerDistance: dangerDistance,
         currentDistance: currentDistance,
         personDetected: personDetected,
+        hardwareConnected: hardwareConnected,
         danger: danger,
         alarmOn: alarmOn,
         ownerNotified: ownerNotified,
         onDangerChanged: updateDangerDistance,
-        onCurrentChanged: updateCurrentDistance,
-        onSimulate: simulateDetection,
-        onClear: clearDetection,
       ),
 
       AlertsPage(alerts: alerts),
@@ -1464,6 +1520,7 @@ class DashboardPage extends StatelessWidget {
   final bool personDetected;
   final bool alarmOn;
   final bool ownerNotified;
+  final bool hardwareConnected;
 
   final VoidCallback onMonitor;
   final VoidCallback onAlerts;
@@ -1475,14 +1532,17 @@ class DashboardPage extends StatelessWidget {
     required this.personDetected,
     required this.alarmOn,
     required this.ownerNotified,
+    required this.hardwareConnected,
     required this.onMonitor,
     required this.onAlerts,
   });
 
   @override
   Widget build(BuildContext context) {
-    final danger = personDetected && currentDistance <= dangerDistance;
-
+    final danger =
+        hardwareConnected &&
+        personDetected &&
+        currentDistance <= dangerDistance;
     return SingleChildScrollView(
       padding: const EdgeInsets.all(18),
       child: Column(
@@ -1523,7 +1583,11 @@ class DashboardPage extends StatelessWidget {
 
           const SizedBox(height: 20),
 
-          StatusCard(safe: !danger, personDetected: personDetected),
+          StatusCard(
+            safe: !danger,
+            personDetected: personDetected,
+            hardwareConnected: hardwareConnected,
+          ),
 
           const SizedBox(height: 18),
 
@@ -1540,7 +1604,10 @@ class DashboardPage extends StatelessWidget {
               Expanded(
                 child: InfoCard(
                   title: 'Current Distance',
-                  value: '${currentDistance.toStringAsFixed(1)} m',
+
+                  value: hardwareConnected
+                      ? '${currentDistance.toStringAsFixed(1)} m'
+                      : '--',
                   icon: Icons.social_distance,
                 ),
               ),
@@ -1567,17 +1634,27 @@ class DashboardPage extends StatelessWidget {
                 const SizedBox(height: 15),
 
                 sensor(
-                  Icons.sensors,
+                  hardwareConnected ? Icons.sensors : Icons.sensors_off,
                   'Distance Sensor',
-                  '${currentDistance.toStringAsFixed(1)} m',
-                  Colors.cyanAccent,
+                  hardwareConnected
+                      ? '${currentDistance.toStringAsFixed(1)} m'
+                      : '--',
+                  hardwareConnected ? Colors.cyanAccent : Colors.orangeAccent,
                 ),
 
                 sensor(
                   Icons.person,
                   'Human Detection',
-                  personDetected ? 'HUMAN DETECTED' : 'NO PERSON DETECTED',
-                  personDetected ? Colors.redAccent : Colors.lightGreenAccent,
+                  hardwareConnected
+                      ? (personDetected
+                            ? 'HUMAN DETECTED'
+                            : 'NO PERSON DETECTED')
+                      : 'WAITING FOR HARDWARE',
+                  !hardwareConnected
+                      ? Colors.orangeAccent
+                      : (personDetected
+                            ? Colors.redAccent
+                            : Colors.lightGreenAccent),
                 ),
 
                 sensor(
@@ -1644,28 +1721,23 @@ class LiveMonitorPage extends StatelessWidget {
   final double dangerDistance;
   final double currentDistance;
   final bool personDetected;
+  final bool hardwareConnected;
   final bool danger;
   final bool alarmOn;
   final bool ownerNotified;
 
   final ValueChanged<double> onDangerChanged;
-  final ValueChanged<double> onCurrentChanged;
-
-  final VoidCallback onSimulate;
-  final VoidCallback onClear;
 
   const LiveMonitorPage({
     super.key,
     required this.dangerDistance,
     required this.currentDistance,
     required this.personDetected,
+    required this.hardwareConnected,
     required this.danger,
     required this.alarmOn,
     required this.ownerNotified,
     required this.onDangerChanged,
-    required this.onCurrentChanged,
-    required this.onSimulate,
-    required this.onClear,
   });
 
   @override
@@ -1706,7 +1778,9 @@ class LiveMonitorPage extends StatelessWidget {
             child: Column(
               children: [
                 Text(
-                  '${currentDistance.toStringAsFixed(1)} m',
+                  hardwareConnected
+                      ? '${currentDistance.toStringAsFixed(1)} m'
+                      : '--',
                   style: const TextStyle(
                     fontSize: 45,
                     fontWeight: FontWeight.bold,
@@ -1801,43 +1875,6 @@ class LiveMonitorPage extends StatelessWidget {
 
           const SizedBox(height: 15),
 
-          SettingCard(
-            title: 'Person Distance',
-            icon: Icons.social_distance,
-            child: Column(
-              children: [
-                Row(
-                  children: [
-                    const Expanded(child: Text('Simulation Distance')),
-                    Text(
-                      '${currentDistance.toStringAsFixed(1)} m',
-                      style: const TextStyle(
-                        color: Colors.cyanAccent,
-                        fontWeight: FontWeight.bold,
-                      ),
-                    ),
-                  ],
-                ),
-
-                Slider(
-                  value: currentDistance,
-                  min: 0.5,
-                  max: 5,
-                  divisions: 18,
-                  label: '${currentDistance.toStringAsFixed(1)} m',
-                  onChanged: personDetected ? onCurrentChanged : null,
-                ),
-
-                const Text(
-                  'First press Simulate Detection, then move this slider.',
-                  style: TextStyle(color: Colors.white54, fontSize: 12),
-                ),
-              ],
-            ),
-          ),
-
-          const SizedBox(height: 15),
-
           Container(
             padding: const EdgeInsets.all(18),
             decoration: BoxDecoration(
@@ -1867,33 +1904,6 @@ class LiveMonitorPage extends StatelessWidget {
                   ownerNotified ? Colors.orangeAccent : Colors.white54,
                 ),
               ],
-            ),
-          ),
-
-          const SizedBox(height: 20),
-
-          SizedBox(
-            width: double.infinity,
-            height: 55,
-            child: ElevatedButton.icon(
-              onPressed: personDetected ? null : onSimulate,
-              icon: const Icon(Icons.person_search),
-              label: const Text(
-                'SIMULATE HUMAN DETECTION',
-                style: TextStyle(fontWeight: FontWeight.bold),
-              ),
-            ),
-          ),
-
-          const SizedBox(height: 12),
-
-          SizedBox(
-            width: double.infinity,
-            height: 50,
-            child: OutlinedButton.icon(
-              onPressed: personDetected ? onClear : null,
-              icon: const Icon(Icons.clear),
-              label: const Text('CLEAR DETECTION'),
             ),
           ),
 
@@ -2203,29 +2213,18 @@ class HowToUsePage extends StatelessWidget {
         'Choose a danger zone between 1 and 5 meters.',
         Icons.radar,
       ],
+
       [
         '6',
-        'Simulate Human',
-        'Press SIMULATE HUMAN DETECTION.',
-        Icons.person_search,
-      ],
-      [
-        '7',
         'Alarm',
         'The warning sound becomes active when the danger zone is entered.',
         Icons.alarm,
       ],
       [
-        '8',
+        '7',
         'Check Alert',
         'Open Alerts to see the safety event.',
         Icons.notifications,
-      ],
-      [
-        '9',
-        'Clear Detection',
-        'Press CLEAR DETECTION after the person leaves.',
-        Icons.check_circle,
       ],
     ];
 
@@ -2312,28 +2311,6 @@ class HowToUsePage extends StatelessWidget {
             }),
 
             const SizedBox(height: 10),
-
-            Container(
-              padding: const EdgeInsets.all(18),
-              decoration: BoxDecoration(
-                color: Colors.orange.withOpacity(.1),
-                borderRadius: BorderRadius.circular(18),
-                border: Border.all(color: Colors.orangeAccent.withOpacity(.4)),
-              ),
-              child: const Row(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Icon(Icons.info, color: Colors.orangeAccent),
-                  SizedBox(width: 12),
-                  Expanded(
-                    child: Text(
-                      'Prototype Mode: Human detection can currently be simulated. ESP32 / HC-SR04 / camera data can be connected to Firebase later.',
-                      style: TextStyle(color: Colors.white70),
-                    ),
-                  ),
-                ],
-              ),
-            ),
           ],
         );
       },
@@ -2454,21 +2431,36 @@ class ProfilePage extends StatelessWidget {
 class StatusCard extends StatelessWidget {
   final bool safe;
   final bool personDetected;
+  final bool hardwareConnected;
 
   const StatusCard({
     super.key,
     required this.safe,
     required this.personDetected,
+    required this.hardwareConnected,
   });
 
   @override
   Widget build(BuildContext context) {
+    final title = !hardwareConnected
+        ? 'WAITING FOR HARDWARE'
+        : (safe ? 'SYSTEM SAFE' : 'DANGER DETECTED');
+
+    final message = !hardwareConnected
+        ? 'Connect the Borewell Guard hardware'
+        : safe
+        ? (personDetected
+              ? 'Person detected but outside danger zone'
+              : 'No person detected')
+        : 'Person detected inside danger zone';
     return Container(
       width: double.infinity,
       padding: const EdgeInsets.all(20),
       decoration: BoxDecoration(
         gradient: LinearGradient(
-          colors: safe
+          colors: !hardwareConnected
+              ? [Colors.orange.shade800, Colors.orange.shade600]
+              : safe
               ? [Colors.green.shade800, Colors.green.shade600]
               : [Colors.red.shade900, Colors.red.shade700],
         ),
@@ -2476,8 +2468,12 @@ class StatusCard extends StatelessWidget {
       ),
       child: Row(
         children: [
-          Icon(safe ? Icons.verified_user : Icons.warning, size: 55),
-
+          Icon(
+            !hardwareConnected
+                ? Icons.sensors_off
+                : (safe ? Icons.verified_user : Icons.warning),
+            size: 55,
+          ),
           const SizedBox(width: 15),
 
           Expanded(
@@ -2485,7 +2481,7 @@ class StatusCard extends StatelessWidget {
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
                 Text(
-                  safe ? 'SYSTEM SAFE' : 'DANGER DETECTED',
+                  title,
                   style: const TextStyle(
                     fontSize: 22,
                     fontWeight: FontWeight.bold,
@@ -2494,13 +2490,7 @@ class StatusCard extends StatelessWidget {
 
                 const SizedBox(height: 5),
 
-                Text(
-                  safe
-                      ? (personDetected
-                            ? 'Person detected but outside danger zone'
-                            : 'No person detected')
-                      : 'Person detected inside danger zone',
-                ),
+                Text(message),
               ],
             ),
           ),
